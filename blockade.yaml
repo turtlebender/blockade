@@ -1,0 +1,20 @@
+containers:
+  c1:
+    image: bowery/mongo
+    command: mongod
+    ports: [80]
+    environment: {"IS_MASTER": 1}
+
+  c2:
+    image: bowery/mongo
+    command: mongod
+
+  c3:
+    image: bowery/mongo
+    command: mongod
+
+network:
+  flaky: 30%
+  slow: 75ms 100ms distribution normal
+
+dvm: true

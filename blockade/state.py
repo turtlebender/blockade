@@ -52,9 +52,12 @@ def _state_delete():
             raise
 
 
-def _base_state(blockade_id, containers):
-    return dict(blockade_id=blockade_id, containers=containers,
-                version=BLOCKADE_STATE_VERSION)
+def _base_state(blockade_id, containers, docker_uri="unix:///var/run/docker.sock", ssh_config=None):
+    if ssh_config:
+        return dict(blockade_id=blockade_id, containers=containers, uri=docker_uri, ssh=ssh_config)
+    else:
+        return dict(blockade_id=blockade_id, containers=containers,
+                    version=BLOCKADE_STATE_VERSION, uri=docker_uri)
 
 
 class BlockadeState(object):
@@ -76,18 +79,17 @@ class BlockadeStateFactory(object):
     # a factory, but fuckit..
 
     @staticmethod
-    def initialize(containers, blockade_id=None):
+    def initialize(containers, blockade_id=None, ssh_config=None, docker_uri='unix:///var/run/docker.sock'):
         if blockade_id is None:
             blockade_id = BLOCKADE_ID_PREFIX + uuid.uuid4().hex[:10]
         containers = deepcopy(containers)
 
-        f = None
         path = BLOCKADE_STATE_FILE
         _assure_dir()
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             with os.fdopen(os.open(path, flags), "w") as f:
-                yaml.dump(_base_state(blockade_id, containers), f)
+                yaml.dump(_base_state(blockade_id, containers, docker_uri, ssh_config), f)
         except OSError as e:
             if e.errno == errno.EEXIST:
                 raise AlreadyInitializedError(

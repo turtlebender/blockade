@@ -16,7 +16,6 @@
 
 import random
 import string
-import subprocess
 
 from .errors import BlockadeError
 import collections
@@ -28,38 +27,50 @@ class NetworkState(object):
     FLAKY = "FLAKY"
     UNKNOWN = "UNKNOWN"
 
+NetworkController = collections.namedtuple(
+  'NetworkController',
+  [
+    'iptables_call_output',
+    'iptables_call',
+    'traffic_control_restore',
+    'traffic_control_netem',
+    'network_state'
+  ]
+)
+
 
 class BlockadeNetwork(object):
-    def __init__(self, config):
+    def __init__(self, controller, config):
         self.config = config
+        self.controller = controller
 
     def new_veth_device_name(self):
         chars = string.ascii_letters + string.digits
         return "veth" + "".join(random.choice(chars) for _ in range(8))
 
     def network_state(self, device):
-        return network_state(device)
+        return self.controller.network_state(device)
 
     def flaky(self, device):
         flaky_config = self.config.network['flaky'].split()
-        traffic_control_netem(device, ["loss"] + flaky_config)
+        self.controller.traffic_control_netem(device, ["loss"] + flaky_config)
 
     def slow(self, device):
         slow_config = self.config.network['slow'].split()
-        traffic_control_netem(device, ["delay"] + slow_config)
+        self.controller.traffic_control_netem(device, ["delay"] + slow_config)
 
     def fast(self, device):
-        traffic_control_restore(device)
+        self.controller.traffic_control_restore(device)
 
     def restore(self, blockade_id):
-        clear_iptables(blockade_id)
+        clear_iptables(self.controller, blockade_id)
 
     def partition_containers(self, blockade_id, partitions):
-        clear_iptables(blockade_id)
-        partition_containers(blockade_id, partitions)
+        clear_iptables(self.controller, blockade_id)
+        partition_containers(self.controller, blockade_id, partitions)
 
     def get_ip_partitions(self, blockade_id):
-        return iptables_get_source_chains(blockade_id)
+        return iptables_get_source_chains(self.controller, blockade_id)
 
 
 def parse_partition_index(blockade_id, chain):
@@ -76,27 +87,10 @@ def partition_chain_name(blockade_id, partition_index):
     return "%s-p%s" % (blockade_id, partition_index)
 
 
-def iptables_call_output(*args):
-    cmd = ["iptables", "-n"] + list(args)
-    try:
-        output = subprocess.check_output(cmd)
-        return output.decode().split("\n")
-    except subprocess.CalledProcessError:
-        raise BlockadeError("Problem calling '%s'" % " ".join(cmd))
-
-
-def iptables_call(*args):
-    cmd = ["iptables"] + list(args)
-    try:
-        subprocess.check_call(cmd)
-    except subprocess.CalledProcessError:
-        raise BlockadeError("Problem calling '%s'" % " ".join(cmd))
-
-
-def iptables_get_chain_rules(chain):
+def iptables_get_chain_rules(controller, chain):
     if not chain:
         raise ValueError("invalid chain")
-    lines = iptables_call_output("-L", chain)
+    lines = controller.iptables_call_output("-L", chain)
     if len(lines) < 2:
         raise BlockadeError("Can't understand iptables output: \n%s" %
                             "\n".join(lines))
@@ -109,7 +103,7 @@ def iptables_get_chain_rules(chain):
     return lines[2:]
 
 
-def iptables_get_source_chains(blockade_id):
+def iptables_get_source_chains(controller, blockade_id):
     """Get a map of blockade chains IDs -> list of IPs targeted at them
 
     For figuring out which container is in which partition
@@ -117,7 +111,7 @@ def iptables_get_source_chains(blockade_id):
     result = {}
     if not blockade_id:
         raise ValueError("invalid blockade_id")
-    lines = iptables_get_chain_rules("FORWARD")
+    lines = iptables_get_chain_rules(controller, "FORWARD")
 
     for line in lines:
         parts = line.split()
@@ -134,23 +128,23 @@ def iptables_get_source_chains(blockade_id):
     return result
 
 
-def iptables_delete_rules(chain, predicate):
+def iptables_delete_rules(controller, chain, predicate):
     if not chain:
         raise ValueError("invalid chain")
     if not isinstance(predicate, collections.Callable):
         raise ValueError("invalid predicate")
 
-    lines = iptables_get_chain_rules(chain)
+    lines = iptables_get_chain_rules(controller, chain)
 
     # TODO this is susceptible to check-then-act races.
     # better to ultimately switch to python-iptables if it becomes less buggy
     for index, line in reversed(list(enumerate(lines, 1))):
         line = line.strip()
         if line and predicate(line):
-            iptables_call("-D", chain, str(index))
+            controller.iptables_call("-D", chain, str(index))
 
 
-def iptables_delete_blockade_rules(blockade_id):
+def iptables_delete_blockade_rules(controller, blockade_id):
     def predicate(rule):
         target = rule.split()[0]
         try:
@@ -158,14 +152,14 @@ def iptables_delete_blockade_rules(blockade_id):
         except ValueError:
             return False
         return True
-    iptables_delete_rules("FORWARD", predicate)
+    iptables_delete_rules(controller, "FORWARD", predicate)
 
 
-def iptables_delete_blockade_chains(blockade_id):
+def iptables_delete_blockade_chains(controller, blockade_id):
     if not blockade_id:
         raise ValueError("invalid blockade_id")
 
-    lines = iptables_call_output("-L")
+    lines = controller.iptables_call_output("-L")
     for line in lines:
         parts = line.split()
         if len(parts) >= 2 and parts[0] == "Chain":
@@ -175,11 +169,11 @@ def iptables_delete_blockade_chains(blockade_id):
             except ValueError:
                 continue
             # if we are a valid blockade chain, flush and delete
-            iptables_call("-F", chain)
-            iptables_call("-X", chain)
+            controller.iptables_call("-F", chain)
+            controller.iptables_call("-X", chain)
 
 
-def iptables_insert_rule(chain, src=None, dest=None, target=None):
+def iptables_insert_rule(controller, chain, src=None, dest=None, target=None):
     """Insert a new rule in the chain
     """
     if not chain:
@@ -195,90 +189,44 @@ def iptables_insert_rule(chain, src=None, dest=None, target=None):
     if dest:
         args += ["-d", dest]
     args += ["-j", target]
-    iptables_call(*args)
+    controller.iptables_call(*args)
 
 
-def iptables_create_chain(chain):
+def iptables_create_chain(controller, chain):
     """Create a new chain
     """
     if not chain:
         raise ValueError("Invalid chain")
-    iptables_call("-N", chain)
+    controller.iptables_call("-N", chain)
 
 
-def clear_iptables(blockade_id):
+def clear_iptables(controller, blockade_id):
     """Remove all iptables rules and chains related to this blockade
     """
     # first remove refererences to our custom chains
-    iptables_delete_blockade_rules(blockade_id)
+    iptables_delete_blockade_rules(controller, blockade_id)
 
     # then remove the chains themselves
-    iptables_delete_blockade_chains(blockade_id)
+    iptables_delete_blockade_chains(controller, blockade_id)
 
 
-def partition_containers(blockade_id, partitions):
+def partition_containers(controller, blockade_id, partitions):
     if not partitions or len(partitions) == 1:
         return
     for index, partition in enumerate(partitions, 1):
         chain_name = partition_chain_name(blockade_id, index)
 
         # create chain for partition and block traffic TO any other partition
-        iptables_create_chain(chain_name)
+        iptables_create_chain(controller, chain_name)
         for other in partitions:
             if partition is other:
                 continue
             for container in other:
                 if container.ip_address:
-                    iptables_insert_rule(chain_name, dest=container.ip_address,
+                    iptables_insert_rule(controller, chain_name, dest=container.ip_address,
                                          target="DROP")
 
         # direct traffic FROM any container in the partition to the new chain
         for container in partition:
-            iptables_insert_rule("FORWARD", src=container.ip_address,
+            iptables_insert_rule(controller, "FORWARD", src=container.ip_address,
                                  target=chain_name)
-
-
-def traffic_control_restore(device):
-    cmd = ["tc", "qdisc", "del", "dev", device, "root"]
-
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE)
-    _, stderr = p.communicate()
-    stderr = stderr.decode()
-
-    if p.returncode != 0:
-        if p.returncode == 2 and stderr:
-            if "No such file or directory" in stderr:
-                return
-
-        # TODO log error somewhere?
-        raise BlockadeError("Problem calling traffic control: " +
-                            " ".join(cmd))
-
-
-def traffic_control_netem(device, params):
-    try:
-        cmd = ["tc", "qdisc", "replace", "dev", device,
-               "root", "netem"] + params
-        subprocess.check_call(cmd)
-
-    except subprocess.CalledProcessError:
-        # TODO log error somewhere?
-        raise BlockadeError("Problem calling traffic control: " +
-                            " ".join(cmd))
-
-
-def network_state(device):
-    try:
-        output = subprocess.check_output(
-            ["tc", "qdisc", "show", "dev", device]).decode()
-        # sloppy but good enough for now
-        if " delay " in output:
-            return NetworkState.SLOW
-        if " loss " in output:
-            return NetworkState.FLAKY
-        return NetworkState.NORMAL
-
-    except subprocess.CalledProcessError:
-        # TODO log error somewhere?
-        return NetworkState.UNKNOWN

@@ -51,7 +51,7 @@ def load_config(opts):
 
 
 def get_blockade(config):
-    return Blockade(config, BlockadeStateFactory, BlockadeNetwork(config))
+    return Blockade(config, BlockadeStateFactory)
 
 
 def print_containers(containers, to_json=False):
@@ -89,7 +89,6 @@ def _add_container_selection_options(parser):
                         help='Container to select')
     parser.add_argument('--all', action='store_true',
                         help='Select all containers')
-
 
 def _check_container_selections(opts):
     if opts.containers and opts.all:

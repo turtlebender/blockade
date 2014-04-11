@@ -13,14 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
 from copy import deepcopy
+import os
 
 import docker
 
 from .errors import BlockadeError
 from .net import NetworkState, BlockadeNetwork
 from .state import BlockadeStateFactory
+from .ssh import ssh_network_controller
+from .dvm import dvm_init
+from .local import init_local_network_controller
 
 
 class Blockade(object):
@@ -28,8 +31,33 @@ class Blockade(object):
                  docker_client=None):
         self.config = config
         self.state_factory = state_factory or BlockadeStateFactory()
-        self.network = network or BlockadeNetwork(config)
-        self.docker_client = docker_client or docker.Client()
+        # This is not the most elegant way of handling things. We should create a better plugin-ish solution. TRH
+        if config.dvm:
+            config.ssh = dvm_init()
+            config.docker_uri = os.environ['DOCKER_HOST'].replace('tcp', 'http')
+        if config.ssh:
+            ssh_host = config.ssh['host']
+            ssh_port = config.ssh['port']
+            ssh_user = config.ssh['user']
+            ssh_key = config.ssh['key_filename']
+
+            controller = ssh_network_controller(
+                ssh_host,
+                port=ssh_port,
+                username=ssh_user,
+                key_filename=ssh_key
+            )
+        else:
+            controller = init_local_network_controller()
+
+        self.network = network or BlockadeNetwork(controller, config)
+        if docker_client:
+            self.docker_client = docker_client
+        elif config.docker_uri:
+            self.docker_client = docker.Client(config.docker_uri)
+        else:
+            self.docker_client = docker.Client()
+
 
     def create(self):
         container_state = {}
@@ -114,7 +142,7 @@ class Blockade(object):
         containers = self._get_docker_containers(state.blockade_id)
         for container in list(containers.values()):
             container_id = container['Id']
-            self.docker_client.stop(container_id, timeout=3)
+            self.docker_client.stop(container_id)
             self.docker_client.remove_container(container_id)
 
         self.network.restore(state.blockade_id)

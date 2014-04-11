@@ -15,6 +15,8 @@
 #
 
 import collections
+import os
+import traceback
 
 from .errors import BlockadeConfigError
 
@@ -70,20 +72,30 @@ class BlockadeConfig(object):
 
             else:
                 network = _DEFAULT_NETWORK_CONFIG.copy()
-
-            return BlockadeConfig(parsed_containers, network=network)
+            kwargs = {'network': network}
+            docker_uri = d['docker_uri'] if 'docker_uri' in d else 'unix:///var/run/docker.sock'
+            if 'ssh' in d:
+                kwargs['ssh'] = d['ssh']
+            if 'dvm' in d:
+                kwargs['dvm'] = d['dvm']
+                docker_uri = os.environ['DOCKER_HOST']
+            return BlockadeConfig(docker_uri, parsed_containers, **kwargs)
 
         except KeyError as e:
             raise BlockadeConfigError("Config missing value: " + str(e))
 
         except Exception as e:
             # TODO log this to some debug stream?
+            print traceback.format_exc()
             raise BlockadeConfigError("Failed to load config: " + str(e))
 
-    def __init__(self, containers, network=None):
+    def __init__(self, docker_uri, containers, network=None, ssh=None, dvm=None):
+        self.docker_uri = docker_uri
         self.containers = containers
         self.sorted_containers = dependency_sorted(containers)
         self.network = network or {}
+        self.ssh = ssh
+        self.dvm = dvm
 
 
 def _dictify(data, name="input"):
